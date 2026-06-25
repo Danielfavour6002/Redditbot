@@ -1,4 +1,5 @@
-praw
 openai
 python-dotenv
 requests
+flask
+feedparser
