@@ -3,7 +3,6 @@ import time
 import threading
 import re
 import requests
-import feedparser
 from openai import OpenAI
 from flask import Flask
 from dotenv import load_dotenv
@@ -15,16 +14,11 @@ openai_client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 
-# Mask script signatures with an explicit, responsible bot header pattern
-CUSTOM_USER_AGENT = "FitnessCoachRadarBot/1.0 (Contact: local-dev-env)"
-
-# DEBUG FIX: Broken into smaller sub-clusters to slide beneath Reddit's rate-limiting firewall
-SUBREDDIT_GROUPS = [
-    "GymMotivation+Fitness30Plus",
-    "HomeGym+WeightLossAdvice",
-    "xxfitness+leangains",
-    "bodyweightfitness+nutrition",
-    "gains+strengthtraining"
+# Track subreddits individually to keep payload requests lightweight
+SUBREDDITS = [
+    "GymMotivation", "Fitness30Plus", "HomeGym", 
+    "WeightLossAdvice", "xxfitness", "bodyweightfitness", 
+    "nutrition", "gains", "strengthtraining"
 ]
 
 KEYWORDS = [
@@ -34,12 +28,12 @@ KEYWORDS = [
 
 seen_post_links = set()
 
-# --- LIGHTWEIGHT WEB FRAMEWORK BINDING FOR RENDER FREE TIERS ---
+# --- LIGHTWEIGHT WEB FRAMEWORK BINDING FOR RENDER ---
 app = Flask(__name__)
 
 @app.route('/')
 def home():
-    return "AI Fitness Radar Engine is operational.", 200
+    return "AI Fitness Radar Proxy Engine is operational.", 200
 
 def run_flask_server():
     port = int(os.getenv("PORT", 8080))
@@ -47,7 +41,6 @@ def run_flask_server():
 # ----------------------------------------------------------------
 
 def generate_ai_coach_comment(post_title, post_body):
-    """Processes post content using OpenAI with explicit timeout handling to mitigate network drops."""
     system_prompt = (
         "You are an elite, empathetic personal fitness coach specializing in real-time "
         "interactive training, form correction, and habit building. Draft a professional, "
@@ -58,7 +51,6 @@ def generate_ai_coach_comment(post_title, post_body):
     user_content = f"Post Title: {post_title}\n\nPost Content: {post_body}"
     
     try:
-        # BUG FIX: Explicit timeout parameter added to prevent connection stalls
         response = openai_client.chat.completions.create(
             model="gpt-4o-mini",
             messages=[
@@ -73,17 +65,10 @@ def generate_ai_coach_comment(post_title, post_body):
         print(f"[-] OpenAI Processing Failure: {e}", flush=True)
         return None
 
-def send_telegram_alert(subreddit_cluster, title, url, ai_draft):
-    """Routes target tracking metrics and drafted content directly to your Telegram bot."""
+def send_telegram_alert(subreddit, title, url, ai_draft):
     telegram_url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-    
-    # Clean the cluster name for visual clarity in notifications
-    clean_sub_display = subreddit_cluster.replace("+", ", ")
-    if len(clean_sub_display) > 30:
-        clean_sub_display = "Fitness Multifeed"
-
     message_text = (
-        f"🚨 *New Match in [{clean_sub_display}]*\n"
+        f"🚨 *New Match in r/{subreddit}*\n"
         f"📌 *Title:* {title}\n\n"
         f"🔗 *Post Link:* {url}\n\n"
         f"🤖 *Suggested AI Draft:* \n"
@@ -104,82 +89,72 @@ def send_telegram_alert(subreddit_cluster, title, url, ai_draft):
         print(f"[-] Telegram Connection Timeout: {e}", flush=True)
 
 def clean_html_tags(raw_html_string):
-    """Strips HTML escape markup and brackets embedded inside Reddit RSS payloads."""
     if not raw_html_string:
         return ""
     clean_text = re.sub(r'<[^>]*>', '', raw_html_string)
-    clean_text = clean_text.replace('&lt;', '<').replace('&gt;', '>')
-    clean_text = re.sub(r'<[^>]*>', '', clean_text)
     return clean_text.strip()
 
-def poll_reddit_rss_feed():
-    """Continuously evaluates target subreddit cluster feeds via RSS stream filters."""
+def poll_reddit_via_proxy():
     global seen_post_links
-    print("[^] Background RSS polling loop initiated...", flush=True)
+    print("[^] Background Proxy polling loop initiated...", flush=True)
     
     while True:
-        for combo in SUBREDDIT_GROUPS:
-            url = f"https://www.reddit.com/r/{combo}/new/.rss"
-            try:
-                feed = feedparser.parse(url, agent=CUSTOM_USER_AGENT)
-                
-                # BUG FIX: Detect 429 rate limit statuses explicitly
-                if hasattr(feed, 'status') and feed.status == 429:
-                    print(f"[-] Reddit Rate Limit (429) hit for cluster: {combo}. Backing off...", flush=True)
-                    time.sleep(10)
-                    continue
-                
-                if feed.bozo and not feed.entries:
-                    print(f"[-] Connection dropped or empty payload for: {combo}", flush=True)
-                    continue
-                
-                for entry in feed.entries:
-                    link = entry.get("link", "")
-                    
-                    if link in seen_post_links:
-                        continue
-                    
-                    title = entry.get("title", "")
-                    summary_payload = entry.get("summary", "")
-                    body_text = clean_html_tags(summary_payload)
-                    
-                    content_pool = f"{title} {body_text}".lower()
-                    
-                    print(f"[Scanning] {combo} -> {title[:40]}...", flush=True)
-                    
-                    if any(keyword in content_pool for keyword in KEYWORDS):
-                        print(f"[*] Match detected on keyword! Generating draft...", flush=True)
-                        
-                        ai_draft = generate_ai_coach_comment(title, body_text)
-                        if ai_draft:
-                            send_telegram_alert(combo, title, link, ai_draft)
-                        else:
-                            print("[-] Message skipped due to OpenAI error.", flush=True)
-                    
-                    seen_post_links.add(link)
-            except Exception as e:
-                print(f"[-] Operational runtime failure parsing cluster data: {e}", flush=True)
+        for sub in SUBREDDITS:
+            reddit_rss = f"https://www.reddit.com/r/{sub}/new/.rss"
+            # Proxy parser service URL
+            proxy_url = f"https://api.rss2json.com/v1/api.json?rss_url={reddit_rss}"
             
-            # BUG FIX: Pushed from 3s to 5s to prevent slamming the server with quick requests
+            try:
+                response = requests.get(proxy_url, timeout=15)
+                if response.status_code == 200:
+                    data = response.json()
+                    items = data.get("items", [])
+                    
+                    for item in items:
+                        link = item.get("link", "")
+                        if link in seen_post_links:
+                            continue
+                            
+                        title = item.get("title", "")
+                        description = item.get("description", "")
+                        body_text = clean_html_tags(description)
+                        
+                        content_pool = f"{title} {body_text}".lower()
+                        print(f"[Scanning] r/{sub} -> {title[:40]}...", flush=True)
+                        
+                        if any(keyword in content_pool for keyword in KEYWORDS):
+                            print(f"[*] Match found via Proxy! Generating draft...", flush=True)
+                            ai_draft = generate_ai_coach_comment(title, body_text)
+                            if ai_draft:
+                                send_telegram_alert(sub, title, link, ai_draft)
+                        
+                        seen_post_links.add(link)
+                else:
+                    print(f"[-] Proxy returned status code {response.status_code} for r/{sub}", flush=True)
+            except Exception as e:
+                print(f"[-] Proxy network exception for r/{sub}: {e}", flush=True)
+            
+            # 5-second break between subreddits to be a good internet citizen
             time.sleep(5)
-        
-        print("[~] Lap completed. Main thread entering sleep cycle...", flush=True)
-        time.sleep(60)
+            
+        print("[~] Complete lap processed. Main loop sleeping for 90 seconds...", flush=True)
+        time.sleep(90)
 
 if __name__ == "__main__":
-    # 1. Initialize cold cache array to avoid alerting on historical postings
-    print("[*] Performing cold-start RSS cache warming...", flush=True)
-    for target_group in SUBREDDIT_GROUPS:
+    # Warm up cache so old posts aren't triggered on launch
+    print("[*] Cold-start cache warming via proxy...", flush=True)
+    for sub in SUBREDDITS:
         try:
-            f = feedparser.parse(f"https://www.reddit.com/r/{target_group}/new/.rss", agent=CUSTOM_USER_AGENT)
-            for entry in f.entries:
-                seen_post_links.add(entry.get("link"))
+            res = requests.get(f"https://api.rss2json.com/v1/api.json?rss_url=https://www.reddit.com/r/{sub}/new/.rss", timeout=10)
+            if res.status_code == 200:
+                for item in res.json().get("items", []):
+                    seen_post_links.add(item.get("link"))
         except Exception:
             pass
-    print(f"[+] Cache warmed. Skipped {len(seen_post_links)} historical posts.", flush=True)
+    print(f"[+] Cache warmed. Skipped {len(seen_post_links)} baseline posts.", flush=True)
 
-    # 2. Open concurrent Flask thread mapping for the free hosting environment proxy
+    # Launch Flask for Render's web bind interface
     threading.Thread(target=run_flask_server, daemon=True).start()
     
-    # 3. Hand processing loop execution controls back to the primary engine thread
-    poll_reddit_rss_feed()
+    # Enter core tracker loop
+    poll_reddit_via_proxy()
